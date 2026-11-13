@@ -37,6 +37,115 @@ def accuracy(y_true, y_pred):
     return float(np.mean(y_true == y_pred))
 
 
+# ---------------------------------------------------------------- Decision Tree (base model, เขียนเอง)
+class DecisionTree:
+    """
+    Decision Tree แบบ CART เขียนเองด้วย NumPy (base model ของทั้ง Bagging และ AdaBoost)
+    - แบ่งด้วยคำถาม "feature <= threshold" ที่ทำให้ Gini impurity (ถ่วงน้ำหนักตัวอย่าง) ลดลงมากที่สุด
+    - max_depth=None = แตกกิ่งจนทุก leaf บริสุทธิ์ (ต้นเต็ม ใช้ใน Bagging), max_depth=1 = stump (ใช้ใน AdaBoost)
+    - รับ sample_weight ได้ AdaBoost จึงส่งน้ำหนักตัวอย่างเข้ามาได้
+    - random_state ใช้สลับลำดับการลอง feature (ตัดสินกรณีคำถามสองข้อดีเท่ากัน)
+
+    โครงสร้างต้นไม้เก็บเป็น array ต่อ node: feature_[i], threshold_[i], left_[i], right_[i], value_[i] (น้ำหนักต่อ class)
+    feature_[i] = -1 แปลว่า node i เป็น leaf · node 0 คือราก
+    """
+
+    def __init__(self, max_depth=None, min_samples_split=2, random_state=None):
+        self.max_depth = max_depth
+        self.min_samples_split = min_samples_split
+        self.random_state = random_state
+
+    @staticmethod
+    def gini(counts):
+        """Gini = 1 - Σ p_k²  (counts: น้ำหนักต่อ class, ใส่ได้หลายแถวพร้อมกัน)"""
+        total = counts.sum(axis=-1, keepdims=True)
+        p = counts / np.where(total > 0, total, 1)
+        return 1.0 - (p ** 2).sum(axis=-1)
+
+    def fit(self, X, y, sample_weight=None):
+        X = np.asarray(X, dtype=float)
+        y = np.asarray(y, dtype=int)
+        w = np.ones(len(y)) if sample_weight is None else np.asarray(sample_weight, dtype=float)
+        self.n_classes_ = int(y.max()) + 1
+        self._rng = np.random.default_rng(self.random_state)
+        self.feature_, self.threshold_, self.left_, self.right_, self.value_ = [], [], [], [], []
+        self._grow(X, y, w, depth=0)
+        # list -> array เพื่อทำนายแบบ vectorize
+        self.feature_ = np.array(self.feature_, dtype=int)
+        self.threshold_ = np.array(self.threshold_, dtype=float)
+        self.left_ = np.array(self.left_, dtype=int)
+        self.right_ = np.array(self.right_, dtype=int)
+        self.value_ = np.array(self.value_, dtype=float)
+        return self
+
+    def _grow(self, X, y, w, depth):
+        """สร้าง node แล้วแตกกิ่งซ้าย/ขวาแบบ recursive คืนเลข node"""
+        counts = np.bincount(y, weights=w, minlength=self.n_classes_)
+        node = len(self.feature_)
+        self.feature_.append(-1)
+        self.threshold_.append(np.nan)
+        self.left_.append(-1)
+        self.right_.append(-1)
+        self.value_.append(counts)
+
+        # หยุดเมื่อ: ถึงความลึกที่กำหนด, ตัวอย่างน้อยเกินไป หรือ node บริสุทธิ์แล้ว (มี class เดียว)
+        if ((self.max_depth is not None and depth >= self.max_depth)
+                or len(y) < self.min_samples_split or np.count_nonzero(counts) <= 1):
+            return node
+        split = self._best_split(X, y, w, counts)
+        if split is None:  # ไม่มีคำถามไหนลด impurity ได้ -> เป็น leaf
+            return node
+        f, thr = split
+        go_left = X[:, f] <= thr
+        self.feature_[node], self.threshold_[node] = f, thr
+        self.left_[node] = self._grow(X[go_left], y[go_left], w[go_left], depth + 1)
+        self.right_[node] = self._grow(X[~go_left], y[~go_left], w[~go_left], depth + 1)
+        return node
+
+    def _best_split(self, X, y, w, counts):
+        """
+        ลองทุก feature และทุกจุดตัดระหว่างค่าที่ต่างกัน เลือกจุดที่ Gini หลังแบ่ง (ถ่วงตามน้ำหนักแต่ละฝั่ง) ต่ำสุด
+        ใช้ cumsum: เรียงค่าแล้วสะสมน้ำหนักต่อ class -> ได้ count ฝั่งซ้ายของทุกจุดตัดในครั้งเดียว
+        """
+        n, d = X.shape
+        total = counts.sum()
+        parent = self.gini(counts)
+        onehot_w = np.zeros((n, self.n_classes_))
+        onehot_w[np.arange(n), y] = w  # น้ำหนักของแต่ละตัวอย่าง วางไว้ในคอลัมน์ class ของมัน
+        best_gain, best = 1e-12, None
+        for f in self._rng.permutation(d):
+            order = np.argsort(X[:, f], kind="stable")
+            xs = X[order, f]
+            cut = xs[1:] > xs[:-1]  # ตัดได้เฉพาะระหว่างค่าที่ต่างกัน
+            if not cut.any():
+                continue
+            left = np.cumsum(onehot_w[order], axis=0)[:-1][cut]  # น้ำหนักต่อ class ฝั่งซ้าย ของทุกจุดตัด
+            right = counts - left
+            wl, wr = left.sum(axis=1), right.sum(axis=1)
+            impurity = (wl * self.gini(left) + wr * self.gini(right)) / total
+            gain = parent - impurity
+            gain[(wl <= 0) | (wr <= 0)] = -np.inf
+            i = int(np.argmax(gain))
+            if gain[i] > best_gain:
+                best_gain = gain[i]
+                best = (int(f), float((xs[:-1][cut][i] + xs[1:][cut][i]) / 2))  # threshold = กึ่งกลางระหว่างสองค่า
+        return best
+
+    def predict(self, X):
+        """ส่งทุกตัวอย่างลงต้นไม้พร้อมกัน จนถึง leaf แล้วตอบ class ที่น้ำหนักมากที่สุดใน leaf นั้น"""
+        X = np.asarray(X, dtype=float)
+        node = np.zeros(len(X), dtype=int)
+        while True:
+            f = self.feature_[node]
+            active = np.flatnonzero(f >= 0)  # ตัวอย่างที่ยังไม่ถึง leaf
+            if len(active) == 0:
+                break
+            n_act = node[active]
+            go_left = X[active, f[active]] <= self.threshold_[n_act]
+            node[active] = np.where(go_left, self.left_[n_act], self.right_[n_act])
+        return self.value_[node].argmax(axis=1)
+
+
 # ---------------------------------------------------------------- Bagging
 _X = _y = _BASE_CLS = _BASE_PARAMS = None  # ข้อมูลเทรนและชนิด/ค่าตั้งของ base model ที่แต่ละ worker process เก็บไว้ใช้เอง
 
