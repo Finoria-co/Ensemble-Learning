@@ -13,7 +13,6 @@ import time
 from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
-from sklearn.base import clone
 from sklearn.tree import DecisionTreeClassifier
 
 
@@ -38,13 +37,13 @@ def accuracy(y_true, y_pred):
 
 
 # ---------------------------------------------------------------- Bagging
-_X = _y = _BASE = None  # ข้อมูลเทรนและ base model ที่แต่ละ worker process เก็บไว้ใช้เอง
+_X = _y = _BASE_CLS = _BASE_PARAMS = None  # ข้อมูลเทรนและชนิด/ค่าตั้งของ base model ที่แต่ละ worker process เก็บไว้ใช้เอง
 
 
-def _init_worker(X, y, base):
-    """รันครั้งเดียวตอนเปิด worker: ส่งข้อมูลเทรนและ base model ไปเก็บไว้ จะได้ไม่ต้องส่งซ้ำทุกงาน"""
-    global _X, _y, _BASE
-    _X, _y, _BASE = X, y, base
+def _init_worker(X, y, base_cls, base_params):
+    """รันครั้งเดียวตอนเปิด worker: ส่งข้อมูลเทรนและชนิดของ base model ไปเก็บไว้ จะได้ไม่ต้องส่งซ้ำทุกงาน"""
+    global _X, _y, _BASE_CLS, _BASE_PARAMS
+    _X, _y, _BASE_CLS, _BASE_PARAMS = X, y, base_cls, base_params
 
 
 def _fit_one(args):
@@ -53,10 +52,10 @@ def _fit_one(args):
     ต้องอยู่ระดับ module เพราะ ProcessPoolExecutor บน Windows ต้อง pickle ฟังก์ชันส่งไป process อื่น
     """
     idx, seed = args
-    model = clone(_BASE)  # สำเนาใหม่ที่ยังไม่ได้เทรน
-    if "random_state" in model.get_params():
-        model.set_params(random_state=seed)
-    return model.fit(_X[idx], _y[idx])
+    model = _BASE_CLS(**_BASE_PARAMS)  # สร้างโมเดลใหม่ที่ยังไม่ได้เทรน (เช่น DecisionTreeClassifier())
+    if hasattr(model, "random_state"):
+        model.random_state = seed  # แต่ละต้นใช้ seed ของตัวเอง
+    return model.fit(_X[idx], _y[idx])  # เทรนบน bootstrap ของตัวเองเท่านั้น
 
 
 class BaggingClassifier:
@@ -67,10 +66,13 @@ class BaggingClassifier:
     3. ทำนายด้วยการโหวตเสียงข้างมาก
     """
 
-    def __init__(self, n_estimators=50, max_workers=None, parallel=True, seed=0, base=None):
+    def __init__(self, n_estimators=50, max_workers=None, parallel=True, seed=0,
+                 base=DecisionTreeClassifier, base_params=None):
         self.n_estimators = n_estimators
-        # base model: ค่าเริ่มต้นคือ Decision Tree ต้นเต็ม (ไม่จำกัดความลึก) -> variance สูง bagging จึงช่วยได้มาก
-        self.base = base if base is not None else DecisionTreeClassifier()
+        # base model = class ของ library (ใช้ได้ตามโจทย์) + ค่าตั้ง เช่น base=SVC, base_params={"C": 10}
+        # ค่าเริ่มต้นคือ Decision Tree ต้นเต็ม (ไม่จำกัดความลึก) -> variance สูง bagging จึงช่วยได้มาก
+        self.base = base
+        self.base_params = dict(base_params or {})
         # จำนวน process: ค่าเริ่มต้นไม่เกิน 4 เพราะการเปิด process แต่ละตัวมีต้นทุน (ต้อง import numpy/sklearn ใหม่)
         self.max_workers = max_workers or min(4, os.cpu_count() or 1)
         self.parallel = parallel
@@ -91,11 +93,11 @@ class BaggingClassifier:
             # chunksize: ส่งงานเป็นก้อน ลดจำนวนครั้งที่ต้องสื่อสารข้าม process
             chunk = max(1, self.n_estimators // (4 * self.max_workers))
             with ProcessPoolExecutor(max_workers=self.max_workers,
-                                     initializer=_init_worker, initargs=(X, y, self.base)) as ex:
+                                     initializer=_init_worker, initargs=(X, y, self.base, self.base_params)) as ex:
                 self.estimators_ = list(ex.map(_fit_one, jobs, chunksize=chunk))
         else:
             # แบบไม่ขนาน ไว้จับเวลาเทียบ
-            _init_worker(X, y, self.base)
+            _init_worker(X, y, self.base, self.base_params)
             self.estimators_ = [_fit_one(job) for job in jobs]
         return self
 
