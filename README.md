@@ -53,11 +53,14 @@ Iris จาก Hugging Face [`scikit-learn/iris`](https://huggingface.co/dataset
   - ส่ง X, y ไปเก็บใน worker ครั้งเดียวผ่าน `initializer`
   - `_fit_one` อยู่ระดับ module เพราะบน Windows ต้อง pickle ฟังก์ชันส่งไป process อื่น
 - `AdaBoostSAMME.fit`: ลูป `for t in range(T)` ตามขั้นตอนในหัวข้อ 3
+- **ใช้ library แค่ไหน**: เฉพาะ base model (`DecisionTreeClassifier`; ส่วน 3.1 ใช้ `SVC`) ตัว Bagging (bootstrap, แจกงานขนาน, โหวต) และ Boosting (น้ำหนัก, ε, α, โหวตถ่วง α) เขียนเองด้วย NumPy ทั้งหมด Bagging สร้างโมเดลใหม่เองจาก class + ค่าตั้ง (`base`, `base_params`) ไม่ใช้ `sklearn.base.clone`
+- `verbose=True` ทั้งสองคลาส พิมพ์กลไกทีละขั้น ไว้ดูการทำงานหรือเดโม
 
 ## 5. วิธีรัน
 ```bash
 pip install -r requirements.txt
 python ensemble.py                    # พิมพ์ตาราง accuracy และเวลาเทรน
+python ensemble.py --verbose          # แสดงกลไกทีละขั้น: bootstrap/โหวตของ Bagging และ ε, α, น้ำหนักทีละรอบของ AdaBoost
 jupyter notebook ensemble_iris.ipynb  # กราฟและการวิเคราะห์
 ```
 ถ้า import `datasets` ไม่ได้ `load_data()` จะอ่านไฟล์ CSV เดียวกันจาก Hugging Face ตรงๆ แทน
@@ -88,6 +91,6 @@ Bagging 16 โมเดล ใช้ base = SVM (`SVC(C=10)`) บน Iris ที
 
 - worker เปิดต่อกันทีละตัว ตัวละราว 1.3 s (ต้อง import numpy/sklearn ใหม่) parallel จึงคุ้มเมื่อโมเดลย่อยแต่ละตัวเทรนนานกว่าต้นทุนนี้มากพอ
 - ใช้ SVM แทน DT ในการทดลองนี้ เพราะ SVM เทรนนาน (~n²) แต่โมเดลเล็ก ส่วน DT บนข้อมูลใหญ่โตลึกมาก ต้นทุนไปอยู่ที่การส่งต้นไม้กลับข้าม process
-- `BaggingClassifier(base=...)` รับ base model ของ sklearn ตัวไหนก็ได้ ค่าเริ่มต้นคือ Decision Tree
+- `BaggingClassifier(base=SVC, base_params={"C": 10})` รับ class ของ base model ตัวไหนก็ได้ ค่าเริ่มต้นคือ `DecisionTreeClassifier`
 
 > หัวข้อวิเคราะห์ผลเพิ่มเติมอยู่ใน notebook ส่วนที่ 5
