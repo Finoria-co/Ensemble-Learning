@@ -211,25 +211,36 @@ def load_data(test_size=0.2, seed=42):
     return X_tr, X_te, y_tr, y_te, class_names
 
 
+# ---------------------------------------------------------------- evaluation
+def evaluate(name, model, X_tr, y_tr, X_te, y_te):
+    """เทรน + ทำนาย แล้วคืน accuracy และเวลา (วินาที) ของแต่ละขั้น"""
+    t0 = time.perf_counter()
+    model.fit(X_tr, y_tr)
+    t_fit = time.perf_counter() - t0
+    t0 = time.perf_counter()
+    pred = model.predict(X_te)
+    t_pred = time.perf_counter() - t0
+    return {"model": name, "train_acc": accuracy(y_tr, model.predict(X_tr)), "test_acc": accuracy(y_te, pred),
+            "fit_s": t_fit, "predict_s": t_pred}
+
+
+def compare(X_tr, y_tr, X_te, y_te, n_estimators=50):
+    """ตารางเปรียบเทียบประสิทธิภาพการทำนายและความเร็วของแต่ละวิธี"""
+    return [
+        evaluate("Decision Tree (single)", DecisionTreeClassifier(random_state=0), X_tr, y_tr, X_te, y_te),
+        evaluate(f"Bagging {n_estimators} trees (parallel)", BaggingClassifier(n_estimators, parallel=True, seed=0),
+                 X_tr, y_tr, X_te, y_te),
+        evaluate(f"Bagging {n_estimators} trees (sequential)", BaggingClassifier(n_estimators, parallel=False, seed=0),
+                 X_tr, y_tr, X_te, y_te),
+        evaluate("Decision Stump (single)", DecisionTreeClassifier(max_depth=1, random_state=0), X_tr, y_tr, X_te, y_te),
+        evaluate(f"AdaBoost SAMME {n_estimators} rounds", AdaBoostSAMME(n_estimators, seed=0), X_tr, y_tr, X_te, y_te),
+    ]
+
+
 # ---------------------------------------------------------------- main
 if __name__ == "__main__":  # จำเป็นบน Windows: process ลูกจะ import ไฟล์นี้ซ้ำ ต้องไม่รันส่วนนี้ซ้ำ
     X_tr, X_te, y_tr, y_te, _ = load_data()
-    print(f"Iris ({HF_DATASET}): train {len(X_tr)} / test {len(X_te)}, CPU cores = {os.cpu_count()}\n")
-
-    tree = DecisionTreeClassifier(random_state=0).fit(X_tr, y_tr)
-    stump = DecisionTreeClassifier(max_depth=1, random_state=0).fit(X_tr, y_tr)
-
-    t0 = time.perf_counter()
-    bag = BaggingClassifier(n_estimators=50, parallel=True, seed=0).fit(X_tr, y_tr)
-    t_par = time.perf_counter() - t0
-    t0 = time.perf_counter()
-    BaggingClassifier(n_estimators=50, parallel=False, seed=0).fit(X_tr, y_tr)
-    t_seq = time.perf_counter() - t0
-
-    ada = AdaBoostSAMME(n_estimators=50, seed=0).fit(X_tr, y_tr)
-
-    print(f"{'Model':<32}{'Train acc':>10}{'Test acc':>10}")
-    for name, m in [("Decision Tree (single)", tree), ("Bagging (50 trees, parallel)", bag),
-                    ("Decision Stump (single)", stump), (f"AdaBoost SAMME ({len(ada.alphas_)} stumps)", ada)]:
-        print(f"{name:<32}{accuracy(y_tr, m.predict(X_tr)):>10.4f}{accuracy(y_te, m.predict(X_te)):>10.4f}")
-    print(f"\nBagging fit time: parallel {t_par:.3f}s  vs  sequential {t_seq:.3f}s")
+    print(f"Iris ({HF_DATASET}): train {len(X_tr)} / test {len(X_te)} (80/20), CPU cores = {os.cpu_count()}\n")
+    print(f"{'Model':<34}{'Train acc':>10}{'Test acc':>10}{'Fit (s)':>10}{'Predict (s)':>13}")
+    for r in compare(X_tr, y_tr, X_te, y_te):
+        print(f"{r['model']:<34}{r['train_acc']:>10.4f}{r['test_acc']:>10.4f}{r['fit_s']:>10.3f}{r['predict_s']:>13.4f}")
