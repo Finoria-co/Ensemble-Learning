@@ -11,6 +11,7 @@ Ensemble Learning บนชุดข้อมูล Iris: Bagging (parallel) แ
 import os
 import time
 from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 
 import numpy as np
 from sklearn.tree import DecisionTreeClassifier
@@ -97,19 +98,32 @@ class BaggingClassifier:
             t0 = time.perf_counter()
 
         # ขั้น 2: เทรนทุกต้น
+        self.used_parallel_ = False
         if self.parallel:
             # แบ่งงานให้หลาย process (หลาย CPU core) ทำพร้อมกัน
             # chunksize: ส่งงานเป็นก้อน ลดจำนวนครั้งที่ต้องสื่อสารข้าม process
             chunk = max(1, self.n_estimators // (4 * self.max_workers))
-            with ProcessPoolExecutor(max_workers=self.max_workers,
-                                     initializer=_init_worker, initargs=(X, y, self.base, self.base_params)) as ex:
-                self.estimators_ = list(ex.map(_fit_one, jobs, chunksize=chunk))
+            for attempt in (1, 2):
+                try:
+                    with ProcessPoolExecutor(max_workers=self.max_workers, initializer=_init_worker,
+                                             initargs=(X, y, self.base, self.base_params)) as ex:
+                        self.estimators_ = list(ex.map(_fit_one, jobs, chunksize=chunk))
+                    self.used_parallel_ = True
+                    break
+                except BrokenProcessPool as e:
+                    # worker ตายกลางทาง (เช่น Windows Application Control บล็อก DLL ตอน worker import ครั้งแรก)
+                    # ครั้งแรกลองเปิด pool ใหม่ ครั้งที่สองถอยไปเทรนแบบ sequential และแจ้งให้รู้ว่าไม่ได้ขนาน
+                    print(f"[Bagging] process pool ล้ม (ครั้งที่ {attempt}): {e}")
+            if not self.used_parallel_:
+                print("[Bagging] ใช้ parallel ไม่ได้ในสภาพแวดล้อมนี้ -> เทรนแบบ sequential แทน (เวลาที่วัดได้ไม่ใช่ของ parallel)")
+                _init_worker(X, y, self.base, self.base_params)
+                self.estimators_ = [_fit_one(job) for job in jobs]
         else:
             # แบบไม่ขนาน ไว้จับเวลาเทียบ
             _init_worker(X, y, self.base, self.base_params)
             self.estimators_ = [_fit_one(job) for job in jobs]
         if self.verbose:
-            how = f"parallel {self.max_workers} process" if self.parallel else "sequential ทีละต้น"
+            how = f"parallel {self.max_workers} process" if self.used_parallel_ else "sequential ทีละต้น"
             print(f"[Bagging] ขั้น 2 เทรน {self.base.__name__} {self.n_estimators} ตัว ({how}) "
                   f"ใช้เวลา {time.perf_counter() - t0:.3f} s · แต่ละตัวไม่ต้องรอกัน")
         return self
@@ -264,6 +278,8 @@ def evaluate(name, model, X_tr, y_tr, X_te, y_te):
     t0 = time.perf_counter()
     pred = model.predict(X_te)
     t_pred = time.perf_counter() - t0
+    if getattr(model, "parallel", False) and not getattr(model, "used_parallel_", True):
+        name += " [ถอยเป็น sequential]"  # pool ล้ม ตัวเลขเวลาแถวนี้จึงไม่ใช่ของ parallel
     return {"model": name, "train_acc": accuracy(y_tr, model.predict(X_tr)), "test_acc": accuracy(y_te, pred),
             "fit_s": t_fit, "predict_s": t_pred}
 
