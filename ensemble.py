@@ -176,34 +176,33 @@ class AdaBoostSAMME:
 
 
 # ---------------------------------------------------------------- data
-HF_DATASET = "antoniopelusi/iris"
-HF_CSV_URL = "https://huggingface.co/datasets/antoniopelusi/iris/resolve/main/iris_train.csv"
-FEATURES = ["sepal-length", "sepal-width", "petal-length", "petal-width"]
+HF_DATASET = "scikit-learn/iris"
+HF_CSV_URL = "https://huggingface.co/datasets/scikit-learn/iris/resolve/main/Iris.csv"
+FEATURES = ["SepalLengthCm", "SepalWidthCm", "PetalLengthCm", "PetalWidthCm"]  # ไม่ใช้คอลัมน์ Id
 
 
 def load_iris_hf():
     """
-    โหลด Iris จาก Hugging Face (antoniopelusi/iris) -> X (150, 4), species (150,)
+    โหลด Iris จาก Hugging Face (scikit-learn/iris) -> X (150, 4), species (150,)
     ใช้ datasets.load_dataset ก่อน ถ้าเครื่องไหน import ไม่ได้ ให้อ่านไฟล์ CSV เดียวกันจาก Hugging Face ตรงๆ
     """
     try:
         from datasets import load_dataset
         d = load_dataset(HF_DATASET)["train"]
         X = np.column_stack([np.asarray(d[c], dtype=float) for c in FEATURES])
-        species = np.asarray(d["species"])
+        species = np.asarray(d["Species"])
     except ImportError:
         import io
         import urllib.request
         text = urllib.request.urlopen(HF_CSV_URL, timeout=30).read().decode("utf-8")
         raw = np.genfromtxt(io.StringIO(text), delimiter=",", names=True, dtype=None, encoding="utf-8")
-        cols = raw.dtype.names  # genfromtxt เปลี่ยน '-' ในชื่อคอลัมน์เป็น '_'
-        X = np.column_stack([raw[c].astype(float) for c in cols[:4]])
-        species = raw[cols[4]].astype(str)
+        X = np.column_stack([raw[c].astype(float) for c in FEATURES])
+        species = raw["Species"].astype(str)
     return X, species
 
 
-def load_data(test_size=0.3, seed=42):
-    """Iris แบ่ง train/test 70/30 แบบ stratified (สัดส่วน class เท่ากันทั้งสองชุด)"""
+def load_data(test_size=0.2, seed=42):
+    """Iris แบ่ง train/test 80/20 แบบ stratified (สัดส่วน class เท่ากันทั้งสองชุด) เทรนด้วย 80% เท่านั้น"""
     from sklearn.model_selection import train_test_split
 
     X, species = load_iris_hf()
