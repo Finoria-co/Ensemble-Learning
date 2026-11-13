@@ -67,8 +67,9 @@ class BaggingClassifier:
     """
 
     def __init__(self, n_estimators=50, max_workers=None, parallel=True, seed=0,
-                 base=DecisionTreeClassifier, base_params=None):
+                 base=DecisionTreeClassifier, base_params=None, verbose=False):
         self.n_estimators = n_estimators
+        self.verbose = verbose  # True = พิมพ์ขั้นตอนการทำงาน (ไว้ดูกลไก/เดโม)
         # base model = class ของ library (ใช้ได้ตามโจทย์) + ค่าตั้ง เช่น base=SVC, base_params={"C": 10}
         # ค่าเริ่มต้นคือ Decision Tree ต้นเต็ม (ไม่จำกัดความลึก) -> variance สูง bagging จึงช่วยได้มาก
         self.base = base
@@ -86,6 +87,14 @@ class BaggingClassifier:
         self.boot_idx_ = rng.integers(0, n, size=(self.n_estimators, n))
         seeds = rng.integers(0, 2**31 - 1, size=self.n_estimators)
         jobs = [(idx, int(s)) for idx, s in zip(self.boot_idx_, seeds)]
+        if self.verbose:
+            uniq = np.array([len(np.unique(r)) for r in self.boot_idx_])
+            print(f"[Bagging] ขั้น 1 bootstrap: สุ่มเลขแถวแบบใส่คืน {self.n_estimators} ชุด ชุดละ {n} แถว -> boot_idx_ {self.boot_idx_.shape}")
+            for b in range(min(3, self.n_estimators)):
+                print(f"  ชุด {b + 1}: แถวแรกๆ {self.boot_idx_[b, :8].tolist()} ... "
+                      f"ไม่ซ้ำ {uniq[b]}/{n} ({uniq[b] / n:.0%}), ไม่ถูกเลือก (out-of-bag) {n - uniq[b]}")
+            print(f"  เฉลี่ยทุกชุด: แถวไม่ซ้ำ {uniq.mean() / n:.1%} (ทฤษฎี 1 - 1/e = 63.2%)")
+            t0 = time.perf_counter()
 
         # ขั้น 2: เทรนทุกต้น
         if self.parallel:
@@ -99,14 +108,24 @@ class BaggingClassifier:
             # แบบไม่ขนาน ไว้จับเวลาเทียบ
             _init_worker(X, y, self.base, self.base_params)
             self.estimators_ = [_fit_one(job) for job in jobs]
+        if self.verbose:
+            how = f"parallel {self.max_workers} process" if self.parallel else "sequential ทีละต้น"
+            print(f"[Bagging] ขั้น 2 เทรน {self.base.__name__} {self.n_estimators} ตัว ({how}) "
+                  f"ใช้เวลา {time.perf_counter() - t0:.3f} s · แต่ละตัวไม่ต้องรอกัน")
         return self
 
     def _all_preds(self, X):
         return np.array([est.predict(X) for est in self.estimators_])  # (B, m)
 
-    def predict(self, X):
+    def predict(self, X, verbose=False):
         # ขั้น 3: โหวตเสียงข้างมาก (ทุกต้นมีเสียงเท่ากัน)
-        return majority_vote(self._all_preds(X), self.n_classes_)
+        preds = self._all_preds(X)
+        if verbose:
+            print(f"[Bagging] ขั้น 3 โหวต: แต่ละตัวอย่างนับเสียงจาก {len(preds)} ต้น (เสียงเท่ากัน)")
+            for i in range(min(3, preds.shape[1])):
+                votes = np.bincount(preds[:, i], minlength=self.n_classes_)
+                print(f"  ตัวอย่าง {i}: เสียงต่อ class {votes.tolist()} -> ทาย class {votes.argmax()}")
+        return majority_vote(preds, self.n_classes_)
 
     def staged_score(self, X, y):
         """accuracy เมื่อใช้ 1, 2, ..., B ต้นแรก (ไว้พล็อตกราฟ)"""
