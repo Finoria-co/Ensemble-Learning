@@ -8,7 +8,8 @@
 - [x] `majority_vote` (ใช้ร่วมกับ AdaBoost)
 - [x] notebook ฉบับแรก: กราฟ accuracy, เวลา parallel vs sequential, confusion matrix
 - [x] README, CLAUDE.md, TASKS.md, สร้าง repo
-- [ ] รีวิวและ merge PR ของรุจิรัตน์
+- [x] รีวิวและ merge PR ของรุจิรัตน์ (#2)
+- [x] การทดลองที่ parallel เร็วกว่า: `BaggingClassifier(base=...)` + notebook ส่วน 3.1 (#1)
 - [ ] ก่อน 12:20: รัน `ensemble.py` + notebook บน `main` ล่าสุด แล้วตรวจว่าเปิด repo แบบสาธารณะได้
 
 ## รุจิรัตน์ แสงชัย (6752300739): Boosting + ข้อมูล + วิเคราะห์ผล · branch `rujirat/...`
