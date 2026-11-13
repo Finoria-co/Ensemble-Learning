@@ -12,7 +12,7 @@ Classwork สุดท้ายวิชา Machine Learning: Bagging (parallel)
 - **ห้าม** import `BaggingClassifier`, `AdaBoostClassifier` หรือ ensemble ใดๆ จาก sklearn ตัวอัลกอริทึมต้องเขียนเอง
 - base classifier (`DecisionTreeClassifier`, `KNeighborsClassifier`, `SVC`) เรียกจาก sklearn ได้
 - Bagging ต้องเป็น parallel (`ProcessPoolExecutor`) ส่วน Boosting ต้องเป็น sequential
-- ข้อมูลโหลดผ่าน `ensemble.load_data()` เท่านั้น (Iris จาก Hugging Face `antoniopelusi/iris`, split 70/30 seed 42)
+- ข้อมูลโหลดผ่าน `ensemble.load_data()` เท่านั้น (Iris จาก Hugging Face `scikit-learn/iris`, split 80/20 seed 42)
 - คอมเมนต์ในโค้ดเป็นภาษาไทยสั้นๆ อธิบายเหตุผลทุกส่วนที่เขียนให้ เจ้าของงานต้องอธิบายให้อาจารย์ฟังได้
 - ห้ามแต่งตัวเลขผลลัพธ์ ทุกตัวเลขใน README/notebook ต้องมาจากการรันจริง
 

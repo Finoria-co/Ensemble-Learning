@@ -176,34 +176,33 @@ class AdaBoostSAMME:
 
 
 # ---------------------------------------------------------------- data
-HF_DATASET = "antoniopelusi/iris"
-HF_CSV_URL = "https://huggingface.co/datasets/antoniopelusi/iris/resolve/main/iris_train.csv"
-FEATURES = ["sepal-length", "sepal-width", "petal-length", "petal-width"]
+HF_DATASET = "scikit-learn/iris"
+HF_CSV_URL = "https://huggingface.co/datasets/scikit-learn/iris/resolve/main/Iris.csv"
+FEATURES = ["SepalLengthCm", "SepalWidthCm", "PetalLengthCm", "PetalWidthCm"]  # ไม่ใช้คอลัมน์ Id
 
 
 def load_iris_hf():
     """
-    โหลด Iris จาก Hugging Face (antoniopelusi/iris) -> X (150, 4), species (150,)
+    โหลด Iris จาก Hugging Face (scikit-learn/iris) -> X (150, 4), species (150,)
     ใช้ datasets.load_dataset ก่อน ถ้าเครื่องไหน import ไม่ได้ ให้อ่านไฟล์ CSV เดียวกันจาก Hugging Face ตรงๆ
     """
     try:
         from datasets import load_dataset
         d = load_dataset(HF_DATASET)["train"]
         X = np.column_stack([np.asarray(d[c], dtype=float) for c in FEATURES])
-        species = np.asarray(d["species"])
+        species = np.asarray(d["Species"])
     except ImportError:
         import io
         import urllib.request
         text = urllib.request.urlopen(HF_CSV_URL, timeout=30).read().decode("utf-8")
         raw = np.genfromtxt(io.StringIO(text), delimiter=",", names=True, dtype=None, encoding="utf-8")
-        cols = raw.dtype.names  # genfromtxt เปลี่ยน '-' ในชื่อคอลัมน์เป็น '_'
-        X = np.column_stack([raw[c].astype(float) for c in cols[:4]])
-        species = raw[cols[4]].astype(str)
+        X = np.column_stack([raw[c].astype(float) for c in FEATURES])
+        species = raw["Species"].astype(str)
     return X, species
 
 
-def load_data(test_size=0.3, seed=42):
-    """Iris แบ่ง train/test 70/30 แบบ stratified (สัดส่วน class เท่ากันทั้งสองชุด)"""
+def load_data(test_size=0.2, seed=42):
+    """Iris แบ่ง train/test 80/20 แบบ stratified (สัดส่วน class เท่ากันทั้งสองชุด) เทรนด้วย 80% เท่านั้น"""
     from sklearn.model_selection import train_test_split
 
     X, species = load_iris_hf()
@@ -212,25 +211,36 @@ def load_data(test_size=0.3, seed=42):
     return X_tr, X_te, y_tr, y_te, class_names
 
 
+# ---------------------------------------------------------------- evaluation
+def evaluate(name, model, X_tr, y_tr, X_te, y_te):
+    """เทรน + ทำนาย แล้วคืน accuracy และเวลา (วินาที) ของแต่ละขั้น"""
+    t0 = time.perf_counter()
+    model.fit(X_tr, y_tr)
+    t_fit = time.perf_counter() - t0
+    t0 = time.perf_counter()
+    pred = model.predict(X_te)
+    t_pred = time.perf_counter() - t0
+    return {"model": name, "train_acc": accuracy(y_tr, model.predict(X_tr)), "test_acc": accuracy(y_te, pred),
+            "fit_s": t_fit, "predict_s": t_pred}
+
+
+def compare(X_tr, y_tr, X_te, y_te, n_estimators=50):
+    """ตารางเปรียบเทียบประสิทธิภาพการทำนายและความเร็วของแต่ละวิธี"""
+    return [
+        evaluate("Decision Tree (single)", DecisionTreeClassifier(random_state=0), X_tr, y_tr, X_te, y_te),
+        evaluate(f"Bagging {n_estimators} trees (parallel)", BaggingClassifier(n_estimators, parallel=True, seed=0),
+                 X_tr, y_tr, X_te, y_te),
+        evaluate(f"Bagging {n_estimators} trees (sequential)", BaggingClassifier(n_estimators, parallel=False, seed=0),
+                 X_tr, y_tr, X_te, y_te),
+        evaluate("Decision Stump (single)", DecisionTreeClassifier(max_depth=1, random_state=0), X_tr, y_tr, X_te, y_te),
+        evaluate(f"AdaBoost SAMME {n_estimators} rounds", AdaBoostSAMME(n_estimators, seed=0), X_tr, y_tr, X_te, y_te),
+    ]
+
+
 # ---------------------------------------------------------------- main
 if __name__ == "__main__":  # จำเป็นบน Windows: process ลูกจะ import ไฟล์นี้ซ้ำ ต้องไม่รันส่วนนี้ซ้ำ
     X_tr, X_te, y_tr, y_te, _ = load_data()
-    print(f"Iris ({HF_DATASET}): train {len(X_tr)} / test {len(X_te)}, CPU cores = {os.cpu_count()}\n")
-
-    tree = DecisionTreeClassifier(random_state=0).fit(X_tr, y_tr)
-    stump = DecisionTreeClassifier(max_depth=1, random_state=0).fit(X_tr, y_tr)
-
-    t0 = time.perf_counter()
-    bag = BaggingClassifier(n_estimators=50, parallel=True, seed=0).fit(X_tr, y_tr)
-    t_par = time.perf_counter() - t0
-    t0 = time.perf_counter()
-    BaggingClassifier(n_estimators=50, parallel=False, seed=0).fit(X_tr, y_tr)
-    t_seq = time.perf_counter() - t0
-
-    ada = AdaBoostSAMME(n_estimators=50, seed=0).fit(X_tr, y_tr)
-
-    print(f"{'Model':<32}{'Train acc':>10}{'Test acc':>10}")
-    for name, m in [("Decision Tree (single)", tree), ("Bagging (50 trees, parallel)", bag),
-                    ("Decision Stump (single)", stump), (f"AdaBoost SAMME ({len(ada.alphas_)} stumps)", ada)]:
-        print(f"{name:<32}{accuracy(y_tr, m.predict(X_tr)):>10.4f}{accuracy(y_te, m.predict(X_te)):>10.4f}")
-    print(f"\nBagging fit time: parallel {t_par:.3f}s  vs  sequential {t_seq:.3f}s")
+    print(f"Iris ({HF_DATASET}): train {len(X_tr)} / test {len(X_te)} (80/20), CPU cores = {os.cpu_count()}\n")
+    print(f"{'Model':<34}{'Train acc':>10}{'Test acc':>10}{'Fit (s)':>10}{'Predict (s)':>13}")
+    for r in compare(X_tr, y_tr, X_te, y_te):
+        print(f"{r['model']:<34}{r['train_acc']:>10.4f}{r['test_acc']:>10.4f}{r['fit_s']:>10.3f}{r['predict_s']:>13.4f}")

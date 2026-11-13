@@ -15,9 +15,10 @@ Classwork สุดท้าย วิชา Machine Learning (รศ.ดร.ป
 - Boosting ทำงานแบบ **sequential**
 
 ## 2. ข้อมูล
-Iris จาก Hugging Face [`antoniopelusi/iris`](https://huggingface.co/datasets/antoniopelusi/iris): 150 ตัวอย่าง, 4 feature, 3 class (class ละ 50)
-- แบ่ง train/test 70/30 แบบ stratified (`random_state=42`) → train 105, test 45
-- ข้อสังเกต: ชุดนี้ปัด `sepal-length` และ `sepal-width` เป็นจำนวนเต็ม (Iris มาตรฐานมีทศนิยม 1 ตำแหน่ง) ทำให้มีบางตัวอย่างที่ feature เหมือนกันแต่ class ต่างกัน train accuracy จึงได้สูงสุด 0.9905 ไม่ใช่ 1.0
+Iris จาก Hugging Face [`scikit-learn/iris`](https://huggingface.co/datasets/scikit-learn/iris): 150 ตัวอย่าง, 4 feature (`SepalLengthCm`, `SepalWidthCm`, `PetalLengthCm`, `PetalWidthCm` ไม่ใช้คอลัมน์ `Id`), 3 class (class ละ 50)
+- แบ่ง train/test **80/20** แบบ stratified (`random_state=42`) → train 120 (40 ต่อ class), test 30 (10 ต่อ class)
+- Bagging และ Boosting เทรนด้วยข้อมูล 80% เท่านั้น test 20% ใช้วัดผลอย่างเดียว
+- มีแถวซ้ำ 3 แถว แต่เป็น class เดียวกัน ไม่มีแถวที่ feature เหมือนกันแต่ class ต่างกัน
 
 ## 3. ทฤษฎี (เนื้อหาเสริม)
 สไลด์บท 03 Decision Tree กล่าวถึง Boosting ใน C5.0 สั้นๆ รายละเอียดด้านล่างเป็นเนื้อหาเสริม
@@ -61,28 +62,29 @@ jupyter notebook ensemble_iris.ipynb  # กราฟและการวิเ�
 ```
 ถ้า import `datasets` ไม่ได้ `load_data()` จะอ่านไฟล์ CSV เดียวกันจาก Hugging Face ตรงๆ แทน
 
-## 6. ผลลัพธ์ (`python ensemble.py`)
-| Model | Train acc | Test acc |
-|---|---|---|
-| Decision Tree (single) | 0.9905 | 0.9333 |
-| Bagging (50 trees, parallel) | 0.9905 | 0.9111 |
-| Decision Stump (single) | 0.6667 | 0.6667 |
-| AdaBoost SAMME (50 stumps) | 0.9905 | 0.9111 |
+## 6. ผลลัพธ์: ประสิทธิภาพและความเร็ว (`python ensemble.py`)
+| Model | Train acc | Test acc | Fit (s) | Predict (s) |
+|---|---|---|---|---|
+| Decision Tree (single) | 1.0000 | 0.9667 | 0.006 | 0.0005 |
+| Bagging 50 trees (parallel) | 1.0000 | 0.9667 | 1.790 | 0.0056 |
+| Bagging 50 trees (sequential) | 1.0000 | 0.9667 | 0.034 | 0.0037 |
+| Decision Stump (single) | 0.6667 | 0.6667 | 0.001 | 0.0001 |
+| AdaBoost SAMME 50 rounds | 1.0000 | 0.9333 | 0.035 | 0.0036 |
 
-- AdaBoost ยก accuracy ของ stump จาก 0.67 เป็น 0.91
-- เวลา fit ของ Bagging 50 ต้น: parallel 1.86 s, sequential 0.04 s
-  - บน Iris แบบ parallel ช้ากว่า เพราะต้นทุนการเปิด process (ราว 1.9 s คงที่) สูงกว่างานเทรน DT ซึ่งใช้ต้นละไม่ถึง 1 ms
-  - ดูกราฟ B = 10–1000 ใน notebook
+- **ประสิทธิภาพ**: Bagging ได้ 0.9667 เท่าต้นเดียวที่ seed 0 แต่เสถียรกว่า เฉลี่ย 10 seed Bagging ได้ 0.9667 ทุก seed ส่วนต้นเดียวเฉลี่ย 0.9533 · AdaBoost ยก stump จาก 0.67 เป็น 0.93
+- **ความเร็ว**: Bagging แบบ sequential กับ AdaBoost ใช้เวลา fit ใกล้กัน (~0.035 s) ส่วน Bagging แบบ parallel ใช้ ~1.8 s เพราะต้นทุนการเปิด process คงที่ สูงกว่างานเทรน DT ซึ่งใช้ต้นละไม่ถึง 1 ms (ดูกราฟ B = 10–1000 ใน notebook)
+- AdaBoost ทำ parallel ไม่ได้ เพราะรอบ t ต้องรอน้ำหนักจากรอบ t−1
+- เวลาต่างไปเล็กน้อยทุกครั้งที่รัน
 
 ### Parallel เร็วกว่าเมื่อไหร่ (notebook ส่วน 3.1)
 Bagging 16 โมเดล ใช้ base = SVM (`SVC(C=10)`) บน Iris ที่ขยายขนาด (สุ่มแบบใส่คืน + noise σ = 0.8) ใช้ 4 process (เวลา parallel รวมเวลาเปิด process แล้ว · ตัวเลขจากการรัน notebook ล่าสุด เวลาจะต่างไปเล็กน้อยทุกครั้งที่รัน)
 
 | n | parallel | sequential | speedup |
 |---|---|---|---|
-| 2,000 | 1.90 s | 0.35 s | ×0.18 |
-| 5,000 | 5.58 s | 2.08 s | ×0.37 |
-| 10,000 | 7.19 s | 8.70 s | **×1.21** |
-| 20,000 | 16.89 s | 34.40 s | **×2.04** |
+| 2,000 | 1.85 s | 0.32 s | ×0.17 |
+| 5,000 | 5.53 s | 1.91 s | ×0.34 |
+| 10,000 | 7.32 s | 8.40 s | **×1.15** |
+| 20,000 | 14.92 s | 33.24 s | **×2.23** |
 
 - worker เปิดต่อกันทีละตัว ตัวละราว 1.3 s (ต้อง import numpy/sklearn ใหม่) parallel จึงคุ้มเมื่อโมเดลย่อยแต่ละตัวเทรนนานกว่าต้นทุนนี้มากพอ
 - ใช้ SVM แทน DT ในการทดลองนี้ เพราะ SVM เทรนนาน (~n²) แต่โมเดลเล็ก ส่วน DT บนข้อมูลใหญ่โตลึกมาก ต้นทุนไปอยู่ที่การส่งต้นไม้กลับข้าม process
