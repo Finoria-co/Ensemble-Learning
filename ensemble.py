@@ -141,10 +141,12 @@ class AdaBoostSAMME:
     เทรนตามลำดับ: ตัวอย่างที่รอบก่อนทายผิดจะได้น้ำหนักเพิ่ม รอบถัดไปจึงโฟกัสตัวที่ยาก
     """
 
-    def __init__(self, n_estimators=50, max_depth=1, seed=0):
+    def __init__(self, n_estimators=50, max_depth=1, seed=0, verbose=False, feature_names=None):
         self.n_estimators = n_estimators
         self.max_depth = max_depth
         self.seed = seed
+        self.verbose = verbose  # True = พิมพ์ขั้นตอนทีละรอบ (ไว้ดูกลไก/เดโม)
+        self.feature_names = feature_names  # ชื่อ feature ไว้แสดงคำถามของ stump
 
     def fit(self, X, y):
         n = len(X)
@@ -152,6 +154,9 @@ class AdaBoostSAMME:
         self.n_classes_ = K
         w = np.full(n, 1.0 / n)  # ขั้น 1: เริ่มให้ทุกตัวอย่างมีน้ำหนักเท่ากัน
         self.estimators_, self.alphas_, self.errors_ = [], [], []
+        if self.verbose:
+            print(f"[AdaBoost] ขั้น 1 น้ำหนักเริ่มต้น w = 1/{n} = {1 / n:.4f} ทุกตัว · เทรนทีละรอบ (รอบ t ใช้ w จากรอบ t-1)")
+            print(f"  {'รอบ':>4}  {'คำถามของ stump':<28}{'ผิด':>5}{'ε':>8}{'α':>8}{'น้ำหนักรวมของตัวที่ผิด (ก่อน→หลัง)':>36}")
 
         for t in range(self.n_estimators):  # sequential: รอบ t ใช้ w จากรอบ t-1
             # ขั้น 2: เทรน weak learner โดยถ่วงน้ำหนักตัวอย่างด้วย w
@@ -176,19 +181,37 @@ class AdaBoostSAMME:
                 break  # ทายถูกหมดแล้ว ไม่ต้องปรับน้ำหนักต่อ
 
             # ขั้น 5: เพิ่มน้ำหนักตัวที่ทายผิด แล้ว normalize ให้ผลรวม = 1
+            before = w[miss].sum() / w.sum()
             w = w * np.exp(alpha * miss)
             w = w / w.sum()
+            if self.verbose and (t < 5 or (t + 1) % 10 == 0):
+                print(f"  {t + 1:>4}  {self._rule(stump):<28}{int(miss.sum()):>5}{err:>8.3f}{alpha:>8.3f}"
+                      f"{before:>24.3f} → {w[miss].sum():.3f}")
 
         self.alphas_ = np.array(self.alphas_)
         self.errors_ = np.array(self.errors_)
         return self
 
+    def _rule(self, stump):
+        """คำถามที่ stump ใช้แบ่ง (ราก) เช่น 'PetalWidthCm <= 0.80'"""
+        f, thr = stump.tree_.feature[0], stump.tree_.threshold[0]
+        if f < 0:
+            return "(ไม่แบ่ง)"
+        name = self.feature_names[f] if self.feature_names is not None else f"x[{f}]"
+        return f"{name} <= {thr:.2f}" + (" (+ชั้นลึกกว่า)" if self.max_depth > 1 else "")
+
     def _all_preds(self, X):
         return np.array([est.predict(X) for est in self.estimators_])  # (T, m)
 
-    def predict(self, X):
+    def predict(self, X, verbose=False):
         # H(x) = argmax_k  Σ_t alpha_t · [h_t(x) = k]
-        return majority_vote(self._all_preds(X), self.n_classes_, self.alphas_)
+        preds = self._all_preds(X)
+        if verbose:
+            print(f"[AdaBoost] โหวตถ่วง α: คะแนน class k = ผลรวม α ของ stump ที่ทาย k ({len(preds)} stumps)")
+            for i in range(min(3, preds.shape[1])):
+                score = np.array([self.alphas_[preds[:, i] == k].sum() for k in range(self.n_classes_)])
+                print(f"  ตัวอย่าง {i}: คะแนนต่อ class {np.round(score, 2).tolist()} -> ทาย class {score.argmax()}")
+        return majority_vote(preds, self.n_classes_, self.alphas_)
 
     def staged_score(self, X, y):
         preds = self._all_preds(X)
