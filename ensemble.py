@@ -1,8 +1,7 @@
 """
 Ensemble Learning บนชุดข้อมูล Iris: Bagging (parallel) และ Boosting (AdaBoost SAMME, sequential)
 
-- Base classifier เรียกจาก sklearn ได้ (DecisionTreeClassifier)
-- ตัวอัลกอริทึม Bagging / Boosting เขียนเองทั้งหมดด้วย NumPy
+- เขียนเองทั้งหมดด้วย NumPy ไม่ใช้ library ML: Decision Tree (base model), Bagging, Boosting และการแบ่ง train/test
 - Bagging เทรนโมเดลย่อยพร้อมกันหลาย process ด้วย concurrent.futures.ProcessPoolExecutor (built-in ของ Python)
 - Boosting เทรนทีละรอบตามลำดับ เพราะรอบที่ t ต้องใช้น้ำหนักตัวอย่างจากรอบ t-1
 
@@ -14,7 +13,6 @@ from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 
 import numpy as np
-from sklearn.tree import DecisionTreeClassifier
 
 
 # ---------------------------------------------------------------- helpers
@@ -162,7 +160,7 @@ def _fit_one(args):
     ต้องอยู่ระดับ module เพราะ ProcessPoolExecutor บน Windows ต้อง pickle ฟังก์ชันส่งไป process อื่น
     """
     idx, seed = args
-    model = _BASE_CLS(**_BASE_PARAMS)  # สร้างโมเดลใหม่ที่ยังไม่ได้เทรน (เช่น DecisionTreeClassifier())
+    model = _BASE_CLS(**_BASE_PARAMS)  # สร้างโมเดลใหม่ที่ยังไม่ได้เทรน (เช่น DecisionTree())
     if hasattr(model, "random_state"):
         model.random_state = seed  # แต่ละต้นใช้ seed ของตัวเอง
     return model.fit(_X[idx], _y[idx])  # เทรนบน bootstrap ของตัวเองเท่านั้น
@@ -177,14 +175,14 @@ class BaggingClassifier:
     """
 
     def __init__(self, n_estimators=50, max_workers=None, parallel=True, seed=0,
-                 base=DecisionTreeClassifier, base_params=None, verbose=False):
+                 base=DecisionTree, base_params=None, verbose=False):
         self.n_estimators = n_estimators
         self.verbose = verbose  # True = พิมพ์ขั้นตอนการทำงาน (ไว้ดูกลไก/เดโม)
-        # base model = class ของ library (ใช้ได้ตามโจทย์) + ค่าตั้ง เช่น base=SVC, base_params={"C": 10}
+        # base model = class + ค่าตั้ง เช่น base=DecisionTree, base_params={"max_depth": 3} (สร้างโมเดลใหม่เองในแต่ละ worker)
         # ค่าเริ่มต้นคือ Decision Tree ต้นเต็ม (ไม่จำกัดความลึก) -> variance สูง bagging จึงช่วยได้มาก
         self.base = base
         self.base_params = dict(base_params or {})
-        # จำนวน process: ค่าเริ่มต้นไม่เกิน 4 เพราะการเปิด process แต่ละตัวมีต้นทุน (ต้อง import numpy/sklearn ใหม่)
+        # จำนวน process: ค่าเริ่มต้นไม่เกิน 4 เพราะการเปิด process แต่ละตัวมีต้นทุน (ต้องเปิด Python และ import numpy ใหม่)
         self.max_workers = max_workers or min(4, os.cpu_count() or 1)
         self.parallel = parallel
         self.seed = seed
@@ -283,7 +281,7 @@ class AdaBoostSAMME:
 
         for t in range(self.n_estimators):  # sequential: รอบ t ใช้ w จากรอบ t-1
             # ขั้น 2: เทรน weak learner โดยถ่วงน้ำหนักตัวอย่างด้วย w
-            stump = DecisionTreeClassifier(max_depth=self.max_depth, random_state=self.seed + t)
+            stump = DecisionTree(max_depth=self.max_depth, random_state=self.seed + t)
             stump.fit(X, y, sample_weight=w)
             miss = stump.predict(X) != y  # ตัวไหนทายผิด
 
@@ -317,7 +315,7 @@ class AdaBoostSAMME:
 
     def _rule(self, stump):
         """คำถามที่ stump ใช้แบ่ง (ราก) เช่น 'PetalWidthCm <= 0.80'"""
-        f, thr = stump.tree_.feature[0], stump.tree_.threshold[0]
+        f, thr = stump.feature_[0], stump.threshold_[0]
         if f < 0:
             return "(ไม่แบ่ง)"
         name = self.feature_names[f] if self.feature_names is not None else f"x[{f}]"
@@ -396,12 +394,12 @@ def evaluate(name, model, X_tr, y_tr, X_te, y_te):
 def compare(X_tr, y_tr, X_te, y_te, n_estimators=50):
     """ตารางเปรียบเทียบประสิทธิภาพการทำนายและความเร็วของแต่ละวิธี"""
     return [
-        evaluate("Decision Tree (single)", DecisionTreeClassifier(random_state=0), X_tr, y_tr, X_te, y_te),
+        evaluate("Decision Tree (single)", DecisionTree(random_state=0), X_tr, y_tr, X_te, y_te),
         evaluate(f"Bagging {n_estimators} trees (parallel)", BaggingClassifier(n_estimators, parallel=True, seed=0),
                  X_tr, y_tr, X_te, y_te),
         evaluate(f"Bagging {n_estimators} trees (sequential)", BaggingClassifier(n_estimators, parallel=False, seed=0),
                  X_tr, y_tr, X_te, y_te),
-        evaluate("Decision Stump (single)", DecisionTreeClassifier(max_depth=1, random_state=0), X_tr, y_tr, X_te, y_te),
+        evaluate("Decision Stump (single)", DecisionTree(max_depth=1, random_state=0), X_tr, y_tr, X_te, y_te),
         evaluate(f"AdaBoost SAMME {n_estimators} rounds", AdaBoostSAMME(n_estimators, seed=0), X_tr, y_tr, X_te, y_te),
     ]
 
