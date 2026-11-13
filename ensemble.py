@@ -283,8 +283,20 @@ def compare(X_tr, y_tr, X_te, y_te, n_estimators=50):
 
 # ---------------------------------------------------------------- main
 if __name__ == "__main__":  # จำเป็นบน Windows: process ลูกจะ import ไฟล์นี้ซ้ำ ต้องไม่รันส่วนนี้ซ้ำ
+    import sys
+
     X_tr, X_te, y_tr, y_te, _ = load_data()
     print(f"Iris ({HF_DATASET}): train {len(X_tr)} / test {len(X_te)} (80/20), CPU cores = {os.cpu_count()}\n")
+
+    if "--verbose" in sys.argv:  # python ensemble.py --verbose : แสดงกลไกทีละขั้นของทั้งสองโมเดล
+        print("=" * 20, "Bagging (parallel)", "=" * 20)
+        bag = BaggingClassifier(50, parallel=True, seed=0, verbose=True).fit(X_tr, y_tr)
+        print(f"  test accuracy = {accuracy(y_te, bag.predict(X_te, verbose=True)):.4f}\n")
+        print("=" * 20, "Boosting: AdaBoost SAMME (sequential)", "=" * 20)
+        ada = AdaBoostSAMME(50, seed=0, verbose=True, feature_names=FEATURES).fit(X_tr, y_tr)
+        print(f"  test accuracy = {accuracy(y_te, ada.predict(X_te, verbose=True)):.4f}\n")
+        print("=" * 20, "เปรียบเทียบทุกวิธี", "=" * 20)
+
     print(f"{'Model':<34}{'Train acc':>10}{'Test acc':>10}{'Fit (s)':>10}{'Predict (s)':>13}")
     for r in compare(X_tr, y_tr, X_te, y_te):
         print(f"{r['model']:<34}{r['train_acc']:>10.4f}{r['test_acc']:>10.4f}{r['fit_s']:>10.3f}{r['predict_s']:>13.4f}")
