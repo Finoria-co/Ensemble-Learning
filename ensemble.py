@@ -13,7 +13,6 @@ import time
 from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
-from sklearn.base import clone
 from sklearn.tree import DecisionTreeClassifier
 
 
@@ -38,13 +37,13 @@ def accuracy(y_true, y_pred):
 
 
 # ---------------------------------------------------------------- Bagging
-_X = _y = _BASE = None  # ข้อมูลเทรนและ base model ที่แต่ละ worker process เก็บไว้ใช้เอง
+_X = _y = _BASE_CLS = _BASE_PARAMS = None  # ข้อมูลเทรนและชนิด/ค่าตั้งของ base model ที่แต่ละ worker process เก็บไว้ใช้เอง
 
 
-def _init_worker(X, y, base):
-    """รันครั้งเดียวตอนเปิด worker: ส่งข้อมูลเทรนและ base model ไปเก็บไว้ จะได้ไม่ต้องส่งซ้ำทุกงาน"""
-    global _X, _y, _BASE
-    _X, _y, _BASE = X, y, base
+def _init_worker(X, y, base_cls, base_params):
+    """รันครั้งเดียวตอนเปิด worker: ส่งข้อมูลเทรนและชนิดของ base model ไปเก็บไว้ จะได้ไม่ต้องส่งซ้ำทุกงาน"""
+    global _X, _y, _BASE_CLS, _BASE_PARAMS
+    _X, _y, _BASE_CLS, _BASE_PARAMS = X, y, base_cls, base_params
 
 
 def _fit_one(args):
@@ -53,10 +52,10 @@ def _fit_one(args):
     ต้องอยู่ระดับ module เพราะ ProcessPoolExecutor บน Windows ต้อง pickle ฟังก์ชันส่งไป process อื่น
     """
     idx, seed = args
-    model = clone(_BASE)  # สำเนาใหม่ที่ยังไม่ได้เทรน
-    if "random_state" in model.get_params():
-        model.set_params(random_state=seed)
-    return model.fit(_X[idx], _y[idx])
+    model = _BASE_CLS(**_BASE_PARAMS)  # สร้างโมเดลใหม่ที่ยังไม่ได้เทรน (เช่น DecisionTreeClassifier())
+    if hasattr(model, "random_state"):
+        model.random_state = seed  # แต่ละต้นใช้ seed ของตัวเอง
+    return model.fit(_X[idx], _y[idx])  # เทรนบน bootstrap ของตัวเองเท่านั้น
 
 
 class BaggingClassifier:
@@ -67,10 +66,14 @@ class BaggingClassifier:
     3. ทำนายด้วยการโหวตเสียงข้างมาก
     """
 
-    def __init__(self, n_estimators=50, max_workers=None, parallel=True, seed=0, base=None):
+    def __init__(self, n_estimators=50, max_workers=None, parallel=True, seed=0,
+                 base=DecisionTreeClassifier, base_params=None, verbose=False):
         self.n_estimators = n_estimators
-        # base model: ค่าเริ่มต้นคือ Decision Tree ต้นเต็ม (ไม่จำกัดความลึก) -> variance สูง bagging จึงช่วยได้มาก
-        self.base = base if base is not None else DecisionTreeClassifier()
+        self.verbose = verbose  # True = พิมพ์ขั้นตอนการทำงาน (ไว้ดูกลไก/เดโม)
+        # base model = class ของ library (ใช้ได้ตามโจทย์) + ค่าตั้ง เช่น base=SVC, base_params={"C": 10}
+        # ค่าเริ่มต้นคือ Decision Tree ต้นเต็ม (ไม่จำกัดความลึก) -> variance สูง bagging จึงช่วยได้มาก
+        self.base = base
+        self.base_params = dict(base_params or {})
         # จำนวน process: ค่าเริ่มต้นไม่เกิน 4 เพราะการเปิด process แต่ละตัวมีต้นทุน (ต้อง import numpy/sklearn ใหม่)
         self.max_workers = max_workers or min(4, os.cpu_count() or 1)
         self.parallel = parallel
@@ -84,6 +87,14 @@ class BaggingClassifier:
         self.boot_idx_ = rng.integers(0, n, size=(self.n_estimators, n))
         seeds = rng.integers(0, 2**31 - 1, size=self.n_estimators)
         jobs = [(idx, int(s)) for idx, s in zip(self.boot_idx_, seeds)]
+        if self.verbose:
+            uniq = np.array([len(np.unique(r)) for r in self.boot_idx_])
+            print(f"[Bagging] ขั้น 1 bootstrap: สุ่มเลขแถวแบบใส่คืน {self.n_estimators} ชุด ชุดละ {n} แถว -> boot_idx_ {self.boot_idx_.shape}")
+            for b in range(min(3, self.n_estimators)):
+                print(f"  ชุด {b + 1}: แถวแรกๆ {self.boot_idx_[b, :8].tolist()} ... "
+                      f"ไม่ซ้ำ {uniq[b]}/{n} ({uniq[b] / n:.0%}), ไม่ถูกเลือก (out-of-bag) {n - uniq[b]}")
+            print(f"  เฉลี่ยทุกชุด: แถวไม่ซ้ำ {uniq.mean() / n:.1%} (ทฤษฎี 1 - 1/e = 63.2%)")
+            t0 = time.perf_counter()
 
         # ขั้น 2: เทรนทุกต้น
         if self.parallel:
@@ -91,20 +102,30 @@ class BaggingClassifier:
             # chunksize: ส่งงานเป็นก้อน ลดจำนวนครั้งที่ต้องสื่อสารข้าม process
             chunk = max(1, self.n_estimators // (4 * self.max_workers))
             with ProcessPoolExecutor(max_workers=self.max_workers,
-                                     initializer=_init_worker, initargs=(X, y, self.base)) as ex:
+                                     initializer=_init_worker, initargs=(X, y, self.base, self.base_params)) as ex:
                 self.estimators_ = list(ex.map(_fit_one, jobs, chunksize=chunk))
         else:
             # แบบไม่ขนาน ไว้จับเวลาเทียบ
-            _init_worker(X, y, self.base)
+            _init_worker(X, y, self.base, self.base_params)
             self.estimators_ = [_fit_one(job) for job in jobs]
+        if self.verbose:
+            how = f"parallel {self.max_workers} process" if self.parallel else "sequential ทีละต้น"
+            print(f"[Bagging] ขั้น 2 เทรน {self.base.__name__} {self.n_estimators} ตัว ({how}) "
+                  f"ใช้เวลา {time.perf_counter() - t0:.3f} s · แต่ละตัวไม่ต้องรอกัน")
         return self
 
     def _all_preds(self, X):
         return np.array([est.predict(X) for est in self.estimators_])  # (B, m)
 
-    def predict(self, X):
+    def predict(self, X, verbose=False):
         # ขั้น 3: โหวตเสียงข้างมาก (ทุกต้นมีเสียงเท่ากัน)
-        return majority_vote(self._all_preds(X), self.n_classes_)
+        preds = self._all_preds(X)
+        if verbose:
+            print(f"[Bagging] ขั้น 3 โหวต: แต่ละตัวอย่างนับเสียงจาก {len(preds)} ต้น (เสียงเท่ากัน)")
+            for i in range(min(3, preds.shape[1])):
+                votes = np.bincount(preds[:, i], minlength=self.n_classes_)
+                print(f"  ตัวอย่าง {i}: เสียงต่อ class {votes.tolist()} -> ทาย class {votes.argmax()}")
+        return majority_vote(preds, self.n_classes_)
 
     def staged_score(self, X, y):
         """accuracy เมื่อใช้ 1, 2, ..., B ต้นแรก (ไว้พล็อตกราฟ)"""
@@ -120,10 +141,12 @@ class AdaBoostSAMME:
     เทรนตามลำดับ: ตัวอย่างที่รอบก่อนทายผิดจะได้น้ำหนักเพิ่ม รอบถัดไปจึงโฟกัสตัวที่ยาก
     """
 
-    def __init__(self, n_estimators=50, max_depth=1, seed=0):
+    def __init__(self, n_estimators=50, max_depth=1, seed=0, verbose=False, feature_names=None):
         self.n_estimators = n_estimators
         self.max_depth = max_depth
         self.seed = seed
+        self.verbose = verbose  # True = พิมพ์ขั้นตอนทีละรอบ (ไว้ดูกลไก/เดโม)
+        self.feature_names = feature_names  # ชื่อ feature ไว้แสดงคำถามของ stump
 
     def fit(self, X, y):
         n = len(X)
@@ -131,6 +154,9 @@ class AdaBoostSAMME:
         self.n_classes_ = K
         w = np.full(n, 1.0 / n)  # ขั้น 1: เริ่มให้ทุกตัวอย่างมีน้ำหนักเท่ากัน
         self.estimators_, self.alphas_, self.errors_ = [], [], []
+        if self.verbose:
+            print(f"[AdaBoost] ขั้น 1 น้ำหนักเริ่มต้น w = 1/{n} = {1 / n:.4f} ทุกตัว · เทรนทีละรอบ (รอบ t ใช้ w จากรอบ t-1)")
+            print(f"  {'รอบ':>4}  {'คำถามของ stump':<28}{'ผิด':>5}{'ε':>8}{'α':>8}{'น้ำหนักรวมของตัวที่ผิด (ก่อน→หลัง)':>36}")
 
         for t in range(self.n_estimators):  # sequential: รอบ t ใช้ w จากรอบ t-1
             # ขั้น 2: เทรน weak learner โดยถ่วงน้ำหนักตัวอย่างด้วย w
@@ -155,19 +181,37 @@ class AdaBoostSAMME:
                 break  # ทายถูกหมดแล้ว ไม่ต้องปรับน้ำหนักต่อ
 
             # ขั้น 5: เพิ่มน้ำหนักตัวที่ทายผิด แล้ว normalize ให้ผลรวม = 1
+            before = w[miss].sum() / w.sum()
             w = w * np.exp(alpha * miss)
             w = w / w.sum()
+            if self.verbose and (t < 5 or (t + 1) % 10 == 0):
+                print(f"  {t + 1:>4}  {self._rule(stump):<28}{int(miss.sum()):>5}{err:>8.3f}{alpha:>8.3f}"
+                      f"{before:>24.3f} → {w[miss].sum():.3f}")
 
         self.alphas_ = np.array(self.alphas_)
         self.errors_ = np.array(self.errors_)
         return self
 
+    def _rule(self, stump):
+        """คำถามที่ stump ใช้แบ่ง (ราก) เช่น 'PetalWidthCm <= 0.80'"""
+        f, thr = stump.tree_.feature[0], stump.tree_.threshold[0]
+        if f < 0:
+            return "(ไม่แบ่ง)"
+        name = self.feature_names[f] if self.feature_names is not None else f"x[{f}]"
+        return f"{name} <= {thr:.2f}" + (" (+ชั้นลึกกว่า)" if self.max_depth > 1 else "")
+
     def _all_preds(self, X):
         return np.array([est.predict(X) for est in self.estimators_])  # (T, m)
 
-    def predict(self, X):
+    def predict(self, X, verbose=False):
         # H(x) = argmax_k  Σ_t alpha_t · [h_t(x) = k]
-        return majority_vote(self._all_preds(X), self.n_classes_, self.alphas_)
+        preds = self._all_preds(X)
+        if verbose:
+            print(f"[AdaBoost] โหวตถ่วง α: คะแนน class k = ผลรวม α ของ stump ที่ทาย k ({len(preds)} stumps)")
+            for i in range(min(3, preds.shape[1])):
+                score = np.array([self.alphas_[preds[:, i] == k].sum() for k in range(self.n_classes_)])
+                print(f"  ตัวอย่าง {i}: คะแนนต่อ class {np.round(score, 2).tolist()} -> ทาย class {score.argmax()}")
+        return majority_vote(preds, self.n_classes_, self.alphas_)
 
     def staged_score(self, X, y):
         preds = self._all_preds(X)
@@ -239,8 +283,20 @@ def compare(X_tr, y_tr, X_te, y_te, n_estimators=50):
 
 # ---------------------------------------------------------------- main
 if __name__ == "__main__":  # จำเป็นบน Windows: process ลูกจะ import ไฟล์นี้ซ้ำ ต้องไม่รันส่วนนี้ซ้ำ
+    import sys
+
     X_tr, X_te, y_tr, y_te, _ = load_data()
     print(f"Iris ({HF_DATASET}): train {len(X_tr)} / test {len(X_te)} (80/20), CPU cores = {os.cpu_count()}\n")
+
+    if "--verbose" in sys.argv:  # python ensemble.py --verbose : แสดงกลไกทีละขั้นของทั้งสองโมเดล
+        print("=" * 20, "Bagging (parallel)", "=" * 20)
+        bag = BaggingClassifier(50, parallel=True, seed=0, verbose=True).fit(X_tr, y_tr)
+        print(f"  test accuracy = {accuracy(y_te, bag.predict(X_te, verbose=True)):.4f}\n")
+        print("=" * 20, "Boosting: AdaBoost SAMME (sequential)", "=" * 20)
+        ada = AdaBoostSAMME(50, seed=0, verbose=True, feature_names=FEATURES).fit(X_tr, y_tr)
+        print(f"  test accuracy = {accuracy(y_te, ada.predict(X_te, verbose=True)):.4f}\n")
+        print("=" * 20, "เปรียบเทียบทุกวิธี", "=" * 20)
+
     print(f"{'Model':<34}{'Train acc':>10}{'Test acc':>10}{'Fit (s)':>10}{'Predict (s)':>13}")
     for r in compare(X_tr, y_tr, X_te, y_te):
         print(f"{r['model']:<34}{r['train_acc']:>10.4f}{r['test_acc']:>10.4f}{r['fit_s']:>10.3f}{r['predict_s']:>13.4f}")
