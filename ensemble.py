@@ -366,13 +366,28 @@ def load_iris_hf():
     return X, species
 
 
+def stratified_split(X, y, test_size=0.2, seed=42):
+    """
+    แบ่ง train/test แบบ stratified ด้วย NumPy: สุ่มแยกทีละ class ให้แต่ละ class ไป test ตามสัดส่วนเท่ากัน
+    เช่น Iris class ละ 50 ตัว test_size=0.2 -> test class ละ 10, train class ละ 40
+    """
+    rng = np.random.default_rng(seed)
+    test_idx = []
+    for k in np.unique(y):
+        idx = rng.permutation(np.flatnonzero(y == k))       # สับลำดับแถวของ class k
+        test_idx.extend(idx[:int(round(len(idx) * test_size))])  # หยิบส่วนแรกไปเป็น test
+    is_test = np.zeros(len(y), dtype=bool)
+    is_test[test_idx] = True
+    train = rng.permutation(np.flatnonzero(~is_test))        # สับอีกรอบ ไม่ให้เรียงตาม class
+    test = rng.permutation(np.flatnonzero(is_test))
+    return X[train], X[test], y[train], y[test]
+
+
 def load_data(test_size=0.2, seed=42):
     """Iris แบ่ง train/test 80/20 แบบ stratified (สัดส่วน class เท่ากันทั้งสองชุด) เทรนด้วย 80% เท่านั้น"""
-    from sklearn.model_selection import train_test_split
-
     X, species = load_iris_hf()
     class_names, y = np.unique(species, return_inverse=True)  # ชื่อ species -> 0, 1, 2
-    X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=test_size, stratify=y, random_state=seed)
+    X_tr, X_te, y_tr, y_te = stratified_split(X, y, test_size=test_size, seed=seed)
     return X_tr, X_te, y_tr, y_te, class_names
 
 
