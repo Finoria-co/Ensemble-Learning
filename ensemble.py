@@ -1,8 +1,7 @@
 """
 Ensemble Learning บนชุดข้อมูล Iris: Bagging (parallel) และ Boosting (AdaBoost SAMME, sequential)
 
-- Base classifier เรียกจาก sklearn ได้ (DecisionTreeClassifier)
-- ตัวอัลกอริทึม Bagging / Boosting เขียนเองทั้งหมดด้วย NumPy
+- เขียนเองทั้งหมดด้วย NumPy ไม่ใช้ library ML: Decision Tree (base model), Bagging, Boosting และการแบ่ง train/test
 - Bagging เทรนโมเดลย่อยพร้อมกันหลาย process ด้วย concurrent.futures.ProcessPoolExecutor (built-in ของ Python)
 - Boosting เทรนทีละรอบตามลำดับ เพราะรอบที่ t ต้องใช้น้ำหนักตัวอย่างจากรอบ t-1
 
@@ -11,9 +10,9 @@ Ensemble Learning บนชุดข้อมูล Iris: Bagging (parallel) แ
 import os
 import time
 from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 
 import numpy as np
-from sklearn.tree import DecisionTreeClassifier
 
 
 # ---------------------------------------------------------------- helpers
@@ -36,6 +35,115 @@ def accuracy(y_true, y_pred):
     return float(np.mean(y_true == y_pred))
 
 
+# ---------------------------------------------------------------- Decision Tree (base model, เขียนเอง)
+class DecisionTree:
+    """
+    Decision Tree แบบ CART เขียนเองด้วย NumPy (base model ของทั้ง Bagging และ AdaBoost)
+    - แบ่งด้วยคำถาม "feature <= threshold" ที่ทำให้ Gini impurity (ถ่วงน้ำหนักตัวอย่าง) ลดลงมากที่สุด
+    - max_depth=None = แตกกิ่งจนทุก leaf บริสุทธิ์ (ต้นเต็ม ใช้ใน Bagging), max_depth=1 = stump (ใช้ใน AdaBoost)
+    - รับ sample_weight ได้ AdaBoost จึงส่งน้ำหนักตัวอย่างเข้ามาได้
+    - random_state ใช้สลับลำดับการลอง feature (ตัดสินกรณีคำถามสองข้อดีเท่ากัน)
+
+    โครงสร้างต้นไม้เก็บเป็น array ต่อ node: feature_[i], threshold_[i], left_[i], right_[i], value_[i] (น้ำหนักต่อ class)
+    feature_[i] = -1 แปลว่า node i เป็น leaf · node 0 คือราก
+    """
+
+    def __init__(self, max_depth=None, min_samples_split=2, random_state=None):
+        self.max_depth = max_depth
+        self.min_samples_split = min_samples_split
+        self.random_state = random_state
+
+    @staticmethod
+    def gini(counts):
+        """Gini = 1 - Σ p_k²  (counts: น้ำหนักต่อ class, ใส่ได้หลายแถวพร้อมกัน)"""
+        total = counts.sum(axis=-1, keepdims=True)
+        p = counts / np.where(total > 0, total, 1)
+        return 1.0 - (p ** 2).sum(axis=-1)
+
+    def fit(self, X, y, sample_weight=None):
+        X = np.asarray(X, dtype=float)
+        y = np.asarray(y, dtype=int)
+        w = np.ones(len(y)) if sample_weight is None else np.asarray(sample_weight, dtype=float)
+        self.n_classes_ = int(y.max()) + 1
+        self._rng = np.random.default_rng(self.random_state)
+        self.feature_, self.threshold_, self.left_, self.right_, self.value_ = [], [], [], [], []
+        self._grow(X, y, w, depth=0)
+        # list -> array เพื่อทำนายแบบ vectorize
+        self.feature_ = np.array(self.feature_, dtype=int)
+        self.threshold_ = np.array(self.threshold_, dtype=float)
+        self.left_ = np.array(self.left_, dtype=int)
+        self.right_ = np.array(self.right_, dtype=int)
+        self.value_ = np.array(self.value_, dtype=float)
+        return self
+
+    def _grow(self, X, y, w, depth):
+        """สร้าง node แล้วแตกกิ่งซ้าย/ขวาแบบ recursive คืนเลข node"""
+        counts = np.bincount(y, weights=w, minlength=self.n_classes_)
+        node = len(self.feature_)
+        self.feature_.append(-1)
+        self.threshold_.append(np.nan)
+        self.left_.append(-1)
+        self.right_.append(-1)
+        self.value_.append(counts)
+
+        # หยุดเมื่อ: ถึงความลึกที่กำหนด, ตัวอย่างน้อยเกินไป หรือ node บริสุทธิ์แล้ว (มี class เดียว)
+        if ((self.max_depth is not None and depth >= self.max_depth)
+                or len(y) < self.min_samples_split or np.count_nonzero(counts) <= 1):
+            return node
+        split = self._best_split(X, y, w, counts)
+        if split is None:  # ไม่มีคำถามไหนลด impurity ได้ -> เป็น leaf
+            return node
+        f, thr = split
+        go_left = X[:, f] <= thr
+        self.feature_[node], self.threshold_[node] = f, thr
+        self.left_[node] = self._grow(X[go_left], y[go_left], w[go_left], depth + 1)
+        self.right_[node] = self._grow(X[~go_left], y[~go_left], w[~go_left], depth + 1)
+        return node
+
+    def _best_split(self, X, y, w, counts):
+        """
+        ลองทุก feature และทุกจุดตัดระหว่างค่าที่ต่างกัน เลือกจุดที่ Gini หลังแบ่ง (ถ่วงตามน้ำหนักแต่ละฝั่ง) ต่ำสุด
+        ใช้ cumsum: เรียงค่าแล้วสะสมน้ำหนักต่อ class -> ได้ count ฝั่งซ้ายของทุกจุดตัดในครั้งเดียว
+        """
+        n, d = X.shape
+        total = counts.sum()
+        parent = self.gini(counts)
+        onehot_w = np.zeros((n, self.n_classes_))
+        onehot_w[np.arange(n), y] = w  # น้ำหนักของแต่ละตัวอย่าง วางไว้ในคอลัมน์ class ของมัน
+        best_gain, best = 1e-12, None
+        for f in self._rng.permutation(d):
+            order = np.argsort(X[:, f], kind="stable")
+            xs = X[order, f]
+            cut = xs[1:] > xs[:-1]  # ตัดได้เฉพาะระหว่างค่าที่ต่างกัน
+            if not cut.any():
+                continue
+            left = np.cumsum(onehot_w[order], axis=0)[:-1][cut]  # น้ำหนักต่อ class ฝั่งซ้าย ของทุกจุดตัด
+            right = counts - left
+            wl, wr = left.sum(axis=1), right.sum(axis=1)
+            impurity = (wl * self.gini(left) + wr * self.gini(right)) / total
+            gain = parent - impurity
+            gain[(wl <= 0) | (wr <= 0)] = -np.inf
+            i = int(np.argmax(gain))
+            if gain[i] > best_gain:
+                best_gain = gain[i]
+                best = (int(f), float((xs[:-1][cut][i] + xs[1:][cut][i]) / 2))  # threshold = กึ่งกลางระหว่างสองค่า
+        return best
+
+    def predict(self, X):
+        """ส่งทุกตัวอย่างลงต้นไม้พร้อมกัน จนถึง leaf แล้วตอบ class ที่น้ำหนักมากที่สุดใน leaf นั้น"""
+        X = np.asarray(X, dtype=float)
+        node = np.zeros(len(X), dtype=int)
+        while True:
+            f = self.feature_[node]
+            active = np.flatnonzero(f >= 0)  # ตัวอย่างที่ยังไม่ถึง leaf
+            if len(active) == 0:
+                break
+            n_act = node[active]
+            go_left = X[active, f[active]] <= self.threshold_[n_act]
+            node[active] = np.where(go_left, self.left_[n_act], self.right_[n_act])
+        return self.value_[node].argmax(axis=1)
+
+
 # ---------------------------------------------------------------- Bagging
 _X = _y = _BASE_CLS = _BASE_PARAMS = None  # ข้อมูลเทรนและชนิด/ค่าตั้งของ base model ที่แต่ละ worker process เก็บไว้ใช้เอง
 
@@ -52,7 +160,7 @@ def _fit_one(args):
     ต้องอยู่ระดับ module เพราะ ProcessPoolExecutor บน Windows ต้อง pickle ฟังก์ชันส่งไป process อื่น
     """
     idx, seed = args
-    model = _BASE_CLS(**_BASE_PARAMS)  # สร้างโมเดลใหม่ที่ยังไม่ได้เทรน (เช่น DecisionTreeClassifier())
+    model = _BASE_CLS(**_BASE_PARAMS)  # สร้างโมเดลใหม่ที่ยังไม่ได้เทรน (เช่น DecisionTree())
     if hasattr(model, "random_state"):
         model.random_state = seed  # แต่ละต้นใช้ seed ของตัวเอง
     return model.fit(_X[idx], _y[idx])  # เทรนบน bootstrap ของตัวเองเท่านั้น
@@ -67,14 +175,14 @@ class BaggingClassifier:
     """
 
     def __init__(self, n_estimators=50, max_workers=None, parallel=True, seed=0,
-                 base=DecisionTreeClassifier, base_params=None, verbose=False):
+                 base=DecisionTree, base_params=None, verbose=False):
         self.n_estimators = n_estimators
         self.verbose = verbose  # True = พิมพ์ขั้นตอนการทำงาน (ไว้ดูกลไก/เดโม)
-        # base model = class ของ library (ใช้ได้ตามโจทย์) + ค่าตั้ง เช่น base=SVC, base_params={"C": 10}
+        # base model = class + ค่าตั้ง เช่น base=DecisionTree, base_params={"max_depth": 3} (สร้างโมเดลใหม่เองในแต่ละ worker)
         # ค่าเริ่มต้นคือ Decision Tree ต้นเต็ม (ไม่จำกัดความลึก) -> variance สูง bagging จึงช่วยได้มาก
         self.base = base
         self.base_params = dict(base_params or {})
-        # จำนวน process: ค่าเริ่มต้นไม่เกิน 4 เพราะการเปิด process แต่ละตัวมีต้นทุน (ต้อง import numpy/sklearn ใหม่)
+        # จำนวน process: ค่าเริ่มต้นไม่เกิน 4 เพราะการเปิด process แต่ละตัวมีต้นทุน (ต้องเปิด Python และ import numpy ใหม่)
         self.max_workers = max_workers or min(4, os.cpu_count() or 1)
         self.parallel = parallel
         self.seed = seed
@@ -97,19 +205,32 @@ class BaggingClassifier:
             t0 = time.perf_counter()
 
         # ขั้น 2: เทรนทุกต้น
+        self.used_parallel_ = False
         if self.parallel:
             # แบ่งงานให้หลาย process (หลาย CPU core) ทำพร้อมกัน
             # chunksize: ส่งงานเป็นก้อน ลดจำนวนครั้งที่ต้องสื่อสารข้าม process
             chunk = max(1, self.n_estimators // (4 * self.max_workers))
-            with ProcessPoolExecutor(max_workers=self.max_workers,
-                                     initializer=_init_worker, initargs=(X, y, self.base, self.base_params)) as ex:
-                self.estimators_ = list(ex.map(_fit_one, jobs, chunksize=chunk))
+            for attempt in (1, 2):
+                try:
+                    with ProcessPoolExecutor(max_workers=self.max_workers, initializer=_init_worker,
+                                             initargs=(X, y, self.base, self.base_params)) as ex:
+                        self.estimators_ = list(ex.map(_fit_one, jobs, chunksize=chunk))
+                    self.used_parallel_ = True
+                    break
+                except BrokenProcessPool as e:
+                    # worker ตายกลางทาง (เช่น Windows Application Control บล็อก DLL ตอน worker import ครั้งแรก)
+                    # ครั้งแรกลองเปิด pool ใหม่ ครั้งที่สองถอยไปเทรนแบบ sequential และแจ้งให้รู้ว่าไม่ได้ขนาน
+                    print(f"[Bagging] process pool ล้ม (ครั้งที่ {attempt}): {e}")
+            if not self.used_parallel_:
+                print("[Bagging] ใช้ parallel ไม่ได้ในสภาพแวดล้อมนี้ -> เทรนแบบ sequential แทน (เวลาที่วัดได้ไม่ใช่ของ parallel)")
+                _init_worker(X, y, self.base, self.base_params)
+                self.estimators_ = [_fit_one(job) for job in jobs]
         else:
             # แบบไม่ขนาน ไว้จับเวลาเทียบ
             _init_worker(X, y, self.base, self.base_params)
             self.estimators_ = [_fit_one(job) for job in jobs]
         if self.verbose:
-            how = f"parallel {self.max_workers} process" if self.parallel else "sequential ทีละต้น"
+            how = f"parallel {self.max_workers} process" if self.used_parallel_ else "sequential ทีละต้น"
             print(f"[Bagging] ขั้น 2 เทรน {self.base.__name__} {self.n_estimators} ตัว ({how}) "
                   f"ใช้เวลา {time.perf_counter() - t0:.3f} s · แต่ละตัวไม่ต้องรอกัน")
         return self
@@ -160,7 +281,7 @@ class AdaBoostSAMME:
 
         for t in range(self.n_estimators):  # sequential: รอบ t ใช้ w จากรอบ t-1
             # ขั้น 2: เทรน weak learner โดยถ่วงน้ำหนักตัวอย่างด้วย w
-            stump = DecisionTreeClassifier(max_depth=self.max_depth, random_state=self.seed + t)
+            stump = DecisionTree(max_depth=self.max_depth, random_state=self.seed + t)
             stump.fit(X, y, sample_weight=w)
             miss = stump.predict(X) != y  # ตัวไหนทายผิด
 
@@ -194,7 +315,7 @@ class AdaBoostSAMME:
 
     def _rule(self, stump):
         """คำถามที่ stump ใช้แบ่ง (ราก) เช่น 'PetalWidthCm <= 0.80'"""
-        f, thr = stump.tree_.feature[0], stump.tree_.threshold[0]
+        f, thr = stump.feature_[0], stump.threshold_[0]
         if f < 0:
             return "(ไม่แบ่ง)"
         name = self.feature_names[f] if self.feature_names is not None else f"x[{f}]"
@@ -245,13 +366,28 @@ def load_iris_hf():
     return X, species
 
 
+def stratified_split(X, y, test_size=0.2, seed=42):
+    """
+    แบ่ง train/test แบบ stratified ด้วย NumPy: สุ่มแยกทีละ class ให้แต่ละ class ไป test ตามสัดส่วนเท่ากัน
+    เช่น Iris class ละ 50 ตัว test_size=0.2 -> test class ละ 10, train class ละ 40
+    """
+    rng = np.random.default_rng(seed)
+    test_idx = []
+    for k in np.unique(y):
+        idx = rng.permutation(np.flatnonzero(y == k))       # สับลำดับแถวของ class k
+        test_idx.extend(idx[:int(round(len(idx) * test_size))])  # หยิบส่วนแรกไปเป็น test
+    is_test = np.zeros(len(y), dtype=bool)
+    is_test[test_idx] = True
+    train = rng.permutation(np.flatnonzero(~is_test))        # สับอีกรอบ ไม่ให้เรียงตาม class
+    test = rng.permutation(np.flatnonzero(is_test))
+    return X[train], X[test], y[train], y[test]
+
+
 def load_data(test_size=0.2, seed=42):
     """Iris แบ่ง train/test 80/20 แบบ stratified (สัดส่วน class เท่ากันทั้งสองชุด) เทรนด้วย 80% เท่านั้น"""
-    from sklearn.model_selection import train_test_split
-
     X, species = load_iris_hf()
     class_names, y = np.unique(species, return_inverse=True)  # ชื่อ species -> 0, 1, 2
-    X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=test_size, stratify=y, random_state=seed)
+    X_tr, X_te, y_tr, y_te = stratified_split(X, y, test_size=test_size, seed=seed)
     return X_tr, X_te, y_tr, y_te, class_names
 
 
@@ -264,6 +400,8 @@ def evaluate(name, model, X_tr, y_tr, X_te, y_te):
     t0 = time.perf_counter()
     pred = model.predict(X_te)
     t_pred = time.perf_counter() - t0
+    if getattr(model, "parallel", False) and not getattr(model, "used_parallel_", True):
+        name += " [ถอยเป็น sequential]"  # pool ล้ม ตัวเลขเวลาแถวนี้จึงไม่ใช่ของ parallel
     return {"model": name, "train_acc": accuracy(y_tr, model.predict(X_tr)), "test_acc": accuracy(y_te, pred),
             "fit_s": t_fit, "predict_s": t_pred}
 
@@ -271,12 +409,12 @@ def evaluate(name, model, X_tr, y_tr, X_te, y_te):
 def compare(X_tr, y_tr, X_te, y_te, n_estimators=50):
     """ตารางเปรียบเทียบประสิทธิภาพการทำนายและความเร็วของแต่ละวิธี"""
     return [
-        evaluate("Decision Tree (single)", DecisionTreeClassifier(random_state=0), X_tr, y_tr, X_te, y_te),
+        evaluate("Decision Tree (single)", DecisionTree(random_state=0), X_tr, y_tr, X_te, y_te),
         evaluate(f"Bagging {n_estimators} trees (parallel)", BaggingClassifier(n_estimators, parallel=True, seed=0),
                  X_tr, y_tr, X_te, y_te),
         evaluate(f"Bagging {n_estimators} trees (sequential)", BaggingClassifier(n_estimators, parallel=False, seed=0),
                  X_tr, y_tr, X_te, y_te),
-        evaluate("Decision Stump (single)", DecisionTreeClassifier(max_depth=1, random_state=0), X_tr, y_tr, X_te, y_te),
+        evaluate("Decision Stump (single)", DecisionTree(max_depth=1, random_state=0), X_tr, y_tr, X_te, y_te),
         evaluate(f"AdaBoost SAMME {n_estimators} rounds", AdaBoostSAMME(n_estimators, seed=0), X_tr, y_tr, X_te, y_te),
     ]
 

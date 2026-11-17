@@ -9,8 +9,8 @@ Classwork สุดท้ายวิชา Machine Learning: Bagging (parallel)
 3. อ่าน `README.md` หัวข้อ 3–4 ก่อนแก้โค้ด
 
 ## กติกาโค้ด (ตามโจทย์อาจารย์ ห้ามละเมิด)
-- **ห้าม** import `BaggingClassifier`, `AdaBoostClassifier` หรือ ensemble ใดๆ จาก sklearn ตัวอัลกอริทึมต้องเขียนเอง
-- base classifier (`DecisionTreeClassifier`, `KNeighborsClassifier`, `SVC`) เรียกจาก sklearn ได้
+- **ห้ามใช้ sklearn หรือ library ML อื่น** ทีมตกลงเขียนเองทั้งหมดด้วย NumPy: `DecisionTree` (base model), `BaggingClassifier`, `AdaBoostSAMME`, `stratified_split` อยู่ใน `ensemble.py`
+- base model ใหม่ (ถ้าจะเพิ่ม) ให้เขียนเป็น class ที่มี `fit(X, y, sample_weight=None)` และ `predict(X)` แบบเดียวกับ `DecisionTree`
 - Bagging ต้องเป็น parallel (`ProcessPoolExecutor`) ส่วน Boosting ต้องเป็น sequential
 - ข้อมูลโหลดผ่าน `ensemble.load_data()` เท่านั้น (Iris จาก Hugging Face `scikit-learn/iris`, split 80/20 seed 42)
 - คอมเมนต์ในโค้ดเป็นภาษาไทยสั้นๆ อธิบายเหตุผลทุกส่วนที่เขียนให้ เจ้าของงานต้องอธิบายให้อาจารย์ฟังได้
@@ -33,7 +33,7 @@ python -m venv .venv                      # ถ้า uv venv โดน Applicat
 .venv/Scripts/python.exe -m nbconvert --to notebook --execute --inplace ensemble_iris.ipynb
 ```
 - ใช้ `python -m nbconvert` ไม่ใช่ `jupyter nbconvert` (`jupyter-nbconvert.exe` อาจโดนบล็อก)
-- ถ้า import sklearn แล้วเจอ `DLL load failed ... Application Control` ให้รันซ้ำอีกครั้ง ส่วน `datasets` โหลดไม่ได้ก็ไม่เป็นไร `load_data()` มี fallback
+- ถ้า import แล้วเจอ `DLL load failed ... Application Control` ให้รันซ้ำอีกครั้ง ส่วน `datasets` โหลดไม่ได้ก็ไม่เป็นไร `load_data()` มี fallback
 - ProcessPool บน Windows: ฟังก์ชันที่ส่งเข้า pool ต้องอยู่ใน `ensemble.py` (ไม่ใช่ใน notebook) และสคริปต์ต้องมี `if __name__ == "__main__":`
 
 ## ส่งงาน
